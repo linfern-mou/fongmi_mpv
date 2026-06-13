@@ -588,6 +588,7 @@ static const m_option_t mp_opts[] = {
 #if HAVE_DVDNAV
     {"dvd", OPT_SUBSTRUCT(dvd_opts, dvd_conf)},
 #endif
+    {"force-iso", OPT_BOOL(force_iso)},
     {"edition", OPT_CHOICE(edition_id, {"auto", -1}), M_RANGE(0, 8190)},
     {"flatten-editions", OPT_BOOL(flatten_editions)},
     {"show-dependent-tracks", OPT_BOOL(show_dependent_tracks)},

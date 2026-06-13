@@ -26,6 +26,7 @@
  *
  */
 
+#include <limits.h>
 #include <string.h>
 #include <assert.h>
 
@@ -52,6 +53,7 @@
 #include "video/mp_image.h"
 
 #define BLURAY_SECTOR_SIZE     6144
+#define BLURAY_ISO_BLOCK_SIZE  2048
 
 #define BLURAY_DEFAULT_ANGLE      0
 #define BLURAY_DEFAULT_CHAPTER    0
@@ -90,6 +92,7 @@ const struct m_sub_options stream_bluray_conf = {
 
 struct bluray_priv_s {
     BLURAY *bd;
+    stream_t *iso_stream;
     BLURAY_TITLE_INFO *title_info;
     int num_titles;
     int current_angle;
@@ -99,10 +102,17 @@ struct bluray_priv_s {
     int cfg_title;
     int cfg_playlist;
     char *cfg_device;
+    char *cfg_stream_url;
+    bool quiet_not_bluray;
 
     struct mp_bluray_opts *opts;
     struct m_config_cache *opts_cache;
 };
+
+extern const stream_info_t stream_info_ffmpeg;
+extern const stream_info_t stream_info_bdmv_dir;
+
+static int bluray_stream_open_internal(stream_t *s);
 
 inline static int play_playlist(struct bluray_priv_s *priv, int playlist)
 {
@@ -124,6 +134,79 @@ static void bluray_stream_close(stream_t *s)
         bd_free_title_info(priv->title_info);
     if (priv->bd)
         bd_close(priv->bd);
+    if (priv->iso_stream)
+        free_stream(priv->iso_stream);
+}
+
+static int read_iso_blocks(void *handle, void *buf, int lba, int num_blocks)
+{
+    stream_t *src = handle;
+    if (!src || lba < 0 || num_blocks <= 0)
+        return 0;
+
+    int64_t pos = (int64_t)lba * BLURAY_ISO_BLOCK_SIZE;
+    int64_t size = (int64_t)num_blocks * BLURAY_ISO_BLOCK_SIZE;
+    if (size > INT_MAX)
+        return 0;
+    if (stream_tell(src) != pos && !stream_seek(src, pos))
+        return 0;
+
+    int read = stream_read(src, buf, (int)size);
+    return read > 0 ? read / BLURAY_ISO_BLOCK_SIZE : 0;
+}
+
+static int open_bluray_from_stream(stream_t *s, const char *url)
+{
+    struct bluray_priv_s *b = s->priv;
+    struct stream_open_args args = {
+        .global = s->global,
+        .cancel = s->cancel,
+        .url = url,
+        .flags = STREAM_READ | (s->stream_origin & STREAM_ORIGIN_MASK),
+        .sinfo = &stream_info_ffmpeg,
+    };
+
+    stream_t *iso_stream = NULL;
+    int r = stream_create_with_args(&args, &iso_stream);
+    if (r != STREAM_OK || !iso_stream)
+        return STREAM_UNSUPPORTED;
+
+    if (!iso_stream->seekable) {
+        MP_ERR(s, "Blu-ray ISO stream must be seekable.\n");
+        free_stream(iso_stream);
+        return STREAM_UNSUPPORTED;
+    }
+
+    BLURAY *bd = bd_init();
+    if (!bd) {
+        free_stream(iso_stream);
+        return STREAM_ERROR;
+    }
+
+    if (!bd_open_stream(bd, iso_stream, read_iso_blocks)) {
+        bd_close(bd);
+        free_stream(iso_stream);
+        return STREAM_UNSUPPORTED;
+    }
+
+    b->bd = bd;
+    b->iso_stream = iso_stream;
+    return STREAM_OK;
+}
+
+static int open_bluray_from_device(stream_t *s, const char *device)
+{
+    struct bluray_priv_s *b = s->priv;
+    char *device_tmp = mp_get_user_path(NULL, s->global, device);
+    BLURAY *bd = bd_open(device_tmp, NULL);
+    talloc_free(device_tmp);
+    if (!bd) {
+        MP_ERR(s, "Couldn't open Blu-ray device: %s\n", device);
+        return STREAM_UNSUPPORTED;
+    }
+
+    b->bd = bd;
+    return STREAM_OK;
 }
 
 static void handle_event(stream_t *s, const BD_EVENT *ev)
@@ -343,26 +426,34 @@ static const char *aacs_strerr(int err)
     }
 }
 
-static bool check_disc_info(stream_t *s)
+static int check_disc_info(stream_t *s)
 {
     struct bluray_priv_s *b = s->priv;
     const BLURAY_DISC_INFO *info = bd_get_disc_info(b->bd);
+    if (!info) {
+        MP_ERR(s, "Couldn't read Blu-ray disc information.\n");
+        return STREAM_ERROR;
+    }
 
     // check Blu-ray
     if (!info->bluray_detected) {
-        MP_ERR(s, "Given stream is not a Blu-ray.\n");
-        return false;
+        if (b->quiet_not_bluray) {
+            MP_VERBOSE(s, "Given stream is not a Blu-ray.\n");
+        } else {
+            MP_ERR(s, "Given stream is not a Blu-ray.\n");
+        }
+        return STREAM_UNSUPPORTED;
     }
 
     // check AACS
     if (info->aacs_detected) {
         if (!info->libaacs_detected) {
             MP_ERR(s, "AACS encryption detected but cannot find libaacs.\n");
-            return false;
+            return STREAM_ERROR;
         }
         if (!info->aacs_handled) {
             MP_ERR(s, "AACS error: %s\n", aacs_strerr(info->aacs_error_code));
-            return false;
+            return STREAM_ERROR;
         }
     }
 
@@ -370,15 +461,15 @@ static bool check_disc_info(stream_t *s)
     if (info->bdplus_detected) {
         if (!info->libbdplus_detected) {
             MP_ERR(s, "BD+ encryption detected but cannot find libbdplus.\n");
-            return false;
+            return STREAM_ERROR;
         }
         if (!info->bdplus_handled) {
             MP_ERR(s, "Cannot decrypt BD+ encryption.\n");
-            return false;
+            return STREAM_ERROR;
         }
     }
 
-    return true;
+    return STREAM_OK;
 }
 
 static void select_initial_title(stream_t *s, int title_guess) {
@@ -411,49 +502,45 @@ static int bluray_stream_open_internal(stream_t *s)
     struct bluray_priv_s *b = s->priv;
 
     struct m_config_cache *opts_cache =
-        m_config_cache_alloc(s, s->global, &stream_bluray_conf);
+        m_config_cache_alloc(b, s->global, &stream_bluray_conf);
 
     b->opts_cache = opts_cache;
     b->opts = opts_cache->opts;
 
-    int ret = 0;
-    char *device = NULL;
-    /* find the requested device */
-    if (b->cfg_device && b->cfg_device[0]) {
-        device = b->cfg_device;
-    } else if (b->opts->bluray_device && b->opts->bluray_device[0]) {
-        device = b->opts->bluray_device;
-    } else {
-        device = DEFAULT_OPTICAL_DEVICE;
-    }
-
-    if (!device || !device[0]) {
-        MP_ERR(s, "No Blu-ray device/location was specified ...\n");
-        ret = STREAM_UNSUPPORTED;
-        goto err;
-    }
-
     if (!mp_msg_test(s->log, MSGL_DEBUG))
         bd_set_debug_mask(0);
 
-    /* open device */
-    char *device_tmp = mp_get_user_path(NULL, s->global, device);
-    BLURAY *bd = bd_open(device_tmp, NULL);
-    talloc_free(device_tmp);
-    if (!bd) {
-        MP_ERR(s, "Couldn't open Blu-ray device: %s\n", device);
-        ret = STREAM_UNSUPPORTED;
-        goto err;
-    }
-    b->bd = bd;
+    int ret;
+    if (b->cfg_stream_url && b->cfg_stream_url[0]) {
+        ret = open_bluray_from_stream(s, b->cfg_stream_url);
+    } else {
+        char *device = NULL;
+        /* find the requested device */
+        if (b->cfg_device && b->cfg_device[0]) {
+            device = b->cfg_device;
+        } else if (b->opts->bluray_device && b->opts->bluray_device[0]) {
+            device = b->opts->bluray_device;
+        } else {
+            device = DEFAULT_OPTICAL_DEVICE;
+        }
 
-    if (!check_disc_info(s)) {
-        ret = STREAM_UNSUPPORTED;
-        goto err;
+        if (!device || !device[0]) {
+            MP_ERR(s, "No Blu-ray device/location was specified ...\n");
+            ret = STREAM_UNSUPPORTED;
+            goto err;
+        }
+
+        ret = open_bluray_from_device(s, device);
     }
+    if (ret != STREAM_OK)
+        goto err;
+
+    ret = check_disc_info(s);
+    if (ret != STREAM_OK)
+        goto err;
 
     /* check for available titles on disc */
-    b->num_titles = bd_get_titles(bd, TITLES_RELEVANT, 0);
+    b->num_titles = bd_get_titles(b->bd, TITLES_RELEVANT, 0);
     if (!b->num_titles) {
         MP_ERR(s, "Can't find any Blu-ray-compatible title here.\n");
         ret = STREAM_UNSUPPORTED;
@@ -466,7 +553,7 @@ static int bluray_stream_open_internal(stream_t *s)
     for (int i = 0; i < b->num_titles; i++) {
         /* the information we're accessing (duration, playlist, angle count)
          * doesn't depend on the angle */
-        BLURAY_TITLE_INFO *ti = bd_get_title_info(bd, i, 0);
+        BLURAY_TITLE_INFO *ti = bd_get_title_info(b->bd, i, 0);
         if (!ti)
             continue;
 
@@ -483,14 +570,14 @@ static int bluray_stream_open_internal(stream_t *s)
     b->current_title = -1;
 
     // initialize libbluray event queue
-    bd_get_event(bd, NULL);
+    bd_get_event(b->bd, NULL);
 
-    select_initial_title(s, bd_get_main_title(bd));
+    select_initial_title(s, bd_get_main_title(b->bd));
 
-    if (!bd_select_angle(bd, b->opts->angle - 1))
+    if (!bd_select_angle(b->bd, b->opts->angle - 1))
         MP_WARN(s, "Couldn't select angle '%d'.\n", b->opts->angle - 1);
 
-    b->current_angle = bd_get_current_angle(bd);
+    b->current_angle = bd_get_current_angle(b->bd);
 
     s->fill_buffer = bluray_stream_fill_buffer;
     s->close       = bluray_stream_close;
@@ -564,6 +651,32 @@ const stream_info_t stream_info_bluray = {
     .protocols = (const char*const[]){ "bd", "br", "bluray", NULL },
     .stream_origin = STREAM_ORIGIN_UNSAFE,
 };
+
+int stream_open_bluray_iso(stream_t *stream, const char *url, bool local_path)
+{
+    struct bluray_priv_s *b = talloc_zero(stream, struct bluray_priv_s);
+    stream->priv = b;
+
+    struct MPOpts *opts = mp_get_config_group(stream, stream->global, &mp_opt_root);
+    b->cfg_title = opts->edition_id >= 0 ? opts->edition_id : BLURAY_DEFAULT_TITLE;
+    talloc_free(opts);
+
+    if (local_path)
+        b->cfg_device = talloc_strdup(b, url);
+    else
+        b->cfg_stream_url = talloc_strdup(b, url);
+    b->quiet_not_bluray = true;
+
+    int r = bluray_stream_open_internal(stream);
+    if (r != STREAM_OK) {
+        talloc_free(b);
+        stream->priv = NULL;
+        return r;
+    }
+
+    stream->info = &stream_info_bdmv_dir;
+    return STREAM_OK;
+}
 
 static bool check_bdmv(const char *path)
 {

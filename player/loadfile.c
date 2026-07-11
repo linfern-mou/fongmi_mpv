@@ -410,6 +410,10 @@ void update_demuxer_properties(struct MPContext *mpctx)
     }
     if (events & DEMUX_EVENT_DURATION)
         mp_notify(mpctx, MP_EVENT_DURATION_UPDATE, NULL);
+    if (events & DEMUX_EVENT_LIVE)
+        mp_notify_property(mpctx, "media-live");
+    if (events & DEMUX_EVENT_SEEKABLE)
+        mp_notify_property(mpctx, "seekable");
     demuxer->events = 0;
 }
 

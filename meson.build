@@ -1412,6 +1412,9 @@ if features['android-media-ndk']
     # header only, library is dynamically loaded
     sources += files('video/out/hwdec/hwdec_aimagereader.c')
 endif
+if features['android-media-ndk'] and features['vulkan']
+    sources += files('video/out/hwdec/hwdec_aimagereader_vk.c')
+endif
 
 d3d_hwaccel = get_option('d3d-hwaccel').require(
     win32,

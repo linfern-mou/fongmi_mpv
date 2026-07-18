@@ -603,6 +603,7 @@ static bool start_frame(struct ra_swapchain *sw, struct ra_fbo *out_fbo)
     *out_fbo = (struct ra_fbo) {
         .tex = &p->proxy_tex,
         .flip = frame.flipped,
+        .color_space = frame.color_space,
     };
 
     return true;

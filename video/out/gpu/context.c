@@ -28,10 +28,15 @@
 #include "common/msg.h"
 #include "options/options.h"
 #include "options/m_option.h"
+#include "video/mp_image.h"
 #include "video/out/vo.h"
 
 #include "context.h"
 #include "spirv.h"
+
+#if HAVE_VULKAN
+#include "video/out/vulkan/context.h"
+#endif
 
 /* OpenGL */
 extern const struct ra_ctx_fns ra_ctx_glx;
@@ -344,4 +349,42 @@ void ra_ctx_destroy(struct ra_ctx **ctx_ptr)
     talloc_free(ctx);
 
     *ctx_ptr = NULL;
+}
+
+bool ra_ctx_get_pl_swapchain(struct ra_ctx *ctx, pl_swapchain *swapchain)
+{
+    *swapchain = NULL;
+#if HAVE_VULKAN
+    struct mpvk_ctx *vk = ra_vk_ctx_get(ctx);
+    if (vk) {
+        *swapchain = vk->swapchain;
+        return true;
+    }
+#endif
+
+    return false;
+}
+
+enum ra_color_hint_result ra_swapchain_set_color(
+    struct ra_swapchain *sw, pl_swapchain pl_sw,
+    struct mp_image_params *params)
+{
+    if (!params) {
+        if (sw->fns->set_color)
+            sw->fns->set_color(sw, NULL);
+        if (pl_sw)
+            pl_swapchain_colorspace_hint(pl_sw, NULL);
+        return RA_COLOR_HINT_NONE;
+    }
+
+    if (sw->fns->set_color && sw->fns->set_color(sw, params))
+        return RA_COLOR_HINT_EXTERNAL;
+    if (pl_sw) {
+        pl_swapchain_colorspace_hint(pl_sw, &params->color);
+        return RA_COLOR_HINT_SWAPCHAIN;
+    }
+
+    if (sw->fns->set_color)
+        sw->fns->set_color(sw, NULL);
+    return RA_COLOR_HINT_NONE;
 }

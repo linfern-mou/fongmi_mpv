@@ -96,6 +96,7 @@ static bool android_init(struct ra_ctx *ctx)
     if (!ra_vk_ctx_init(ctx, vk, params, VK_PRESENT_MODE_FIFO_KHR))
         goto fail;
 
+    ctx->supports_auto_colorspace_hint = true;
     return true;
 fail:
     android_uninit(ctx);

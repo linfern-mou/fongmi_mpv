@@ -68,6 +68,20 @@ static int hwdec_opt_help(struct mp_log *log, const m_option_t *opt,
 #define HWDEC_DELAY_QUEUE_COUNT 2
 #define HWDEC_WAIT_KEYFRAME_COUNT 96
 
+static void set_decoder_avopts(struct mp_log *log, AVCodecContext *avctx,
+                               char **kv)
+{
+    for (int n = 0; kv && kv[n * 2]; n++) {
+        char *option[] = {kv[n * 2], kv[n * 2 + 1], NULL};
+        // This is private to FFmpeg's MediaCodec decoder. Ignore it when mpv
+        // tries another decoder after MediaCodec initialization fails.
+        if (strcmp(option[0], "dovi_sink_support") == 0 &&
+            !av_opt_find(avctx, option[0], NULL, 0, AV_OPT_SEARCH_CHILDREN))
+            continue;
+        mp_set_avopts(log, avctx, option);
+    }
+}
+
 #define OPT_BASE_STRUCT struct vd_lavc_params
 
 struct vd_lavc_params {
@@ -853,7 +867,7 @@ static void init_avctx(struct mp_filter *vd)
         break;
     }
 
-    mp_set_avopts(vd->log, avctx, lavc_param->avopts);
+    set_decoder_avopts(vd->log, avctx, lavc_param->avopts);
 
     // Do this after the above avopt handling in case it changes values
     ctx->skip_frame = avctx->skip_frame;

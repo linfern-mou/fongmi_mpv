@@ -251,6 +251,10 @@ static const m_option_t mp_vo_opt_list[] = {
 #if HAVE_EGL_ANDROID
     {"android-surface-size", OPT_SIZE_BOX(android_surface_size)},
 #endif
+#if HAVE_ANDROID
+    {"android-display-peak", OPT_DOUBLE(android_display_peak),
+        M_RANGE(0, DBL_MAX)},
+#endif
 #if HAVE_D3D11
     {"d3d11-composition-size", OPT_SIZE_BOX(d3d11_composition_size)},
 #endif

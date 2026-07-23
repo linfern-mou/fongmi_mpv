@@ -18,6 +18,7 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_android.h>
 
+#include "video/mp_image.h"
 #include "video/out/android_common.h"
 #include "common.h"
 #include "context.h"
@@ -25,6 +26,7 @@
 
 struct priv {
     struct mpvk_ctx vk;
+    double reported_display_peak;
 };
 
 static VkSurfaceKHR android_create_surface(struct ra_ctx *ctx,
@@ -69,6 +71,38 @@ static bool android_check_visible(struct ra_ctx *ctx)
            ra_vk_ctx_has_surface(ctx);
 }
 
+static bool android_set_color(struct ra_ctx *ctx,
+                              struct mp_image_params *params)
+{
+    struct priv *p = ctx->priv;
+    if (!params)
+        return true;
+    if (!p->vk.swapchain)
+        return false;
+
+    double display_peak = ctx->vo->opts->android_display_peak;
+    bool hdr = params->color.transfer == PL_COLOR_TRC_PQ ||
+               params->color.transfer == PL_COLOR_TRC_HLG;
+    if (hdr && display_peak > 0) {
+        params->color.hdr.max_luma = display_peak;
+        if (!params->color.hdr.max_cll ||
+            params->color.hdr.max_cll > display_peak)
+            params->color.hdr.max_cll = display_peak;
+        if (params->color.hdr.max_fall > params->color.hdr.max_cll)
+            params->color.hdr.max_fall = 0;
+        if (p->reported_display_peak != display_peak) {
+            MP_VERBOSE(ctx, "Using Android display HDR peak: %.3f nits\n",
+                       display_peak);
+            p->reported_display_peak = display_peak;
+        }
+    } else {
+        p->reported_display_peak = 0;
+    }
+
+    pl_swapchain_colorspace_hint(p->vk.swapchain, &params->color);
+    return true;
+}
+
 static bool android_init(struct ra_ctx *ctx)
 {
     struct priv *p = ctx->priv = talloc_zero(ctx, struct priv);
@@ -83,6 +117,7 @@ static bool android_init(struct ra_ctx *ctx)
 
     struct ra_ctx_params params = {
         .check_visible = android_check_visible,
+        .set_color = android_set_color,
         // Rotated SurfaceViews may stay suboptimal even after recreation.
         // surfaceChanged drives explicit resizes through android_reconfig.
         .allow_suboptimal = true,

@@ -7135,6 +7135,14 @@ them.
 
     Android with ``--gpu-context=android`` only.
 
+``--android-display-peak=<nits>``
+    Set the measured peak luminance of the Android display associated with the
+    rendering surface. Embedding applications should obtain this value from the
+    display's HDR capabilities. The Android Vulkan context uses it to constrain
+    PQ and HLG target hints; SDR and other gpu contexts are unaffected.
+
+    Android with ``--gpu-context=androidvk`` only.
+
 ``--d3d11-composition-size=<WxH>``
     Set size of the output for d3d11 composition mode.
     When use composition mode, there is no window, must set the output size by

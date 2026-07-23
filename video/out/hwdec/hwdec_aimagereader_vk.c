@@ -708,6 +708,12 @@ static void apply_data_space(
         break;
     }
 
+    // Preserve the driver's suggested numerical range for opaque external
+    // formats. It is intended to match samplerExternalOES sampling, while the
+    // nominal AImage dataspace may not describe the driver's sampled range.
+    if (props->format == VK_FORMAT_UNDEFINED && props->externalFormat)
+        return;
+
     switch (data_space & ADATASPACE_RANGE_MASK) {
     case ADATASPACE_RANGE_FULL:
         props->suggestedYcbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_FULL;
